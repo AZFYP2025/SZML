@@ -34,35 +34,73 @@ async def root():
 
 # Fetch and aggregate data from Firebase
 def fetch_and_aggregate_firebase(path: str) -> pd.DataFrame:
+    # Connect to the Firebase path
     ref = db.reference(path)
     raw_data = ref.get()
 
+    # If no data, return empty DataFrame
     if not raw_data:
         return pd.DataFrame()
 
-    # Convert to list of dicts, skip invalid entries
+    # Convert data to list of records
+    records = []
+    
     if isinstance(raw_data, dict):
-        records = [v for v in raw_data.values() if isinstance(v, dict)]
+        # Handle dictionary format (likely Firebase's default)
+        for key, value in raw_data.items():
+            if isinstance(value, dict):
+                records.append(value)
+            elif isinstance(value, str):
+                # Handle case where value might be a JSON string
+                try:
+                    parsed = json.loads(value)
+                    if isinstance(parsed, dict):
+                        records.append(parsed)
+                except json.JSONDecodeError:
+                    pass
     elif isinstance(raw_data, list):
-        records = [v for v in raw_data if isinstance(v, dict)]
-    else:
-        raise ValueError("Unexpected data format from Firebase")
+        # Handle list format
+        for item in raw_data:
+            if isinstance(item, dict):
+                records.append(item)
+            elif isinstance(item, str):
+                try:
+                    parsed = json.loads(item)
+                    if isinstance(parsed, dict):
+                        records.append(parsed)
+                except json.JSONDecodeError:
+                    pass
 
     if not records:
         return pd.DataFrame()
 
-    df = pd.DataFrame(records)
+    # Convert to DataFrame
+    try:
+        df = pd.DataFrame(records)
+    except ValueError as e:
+        print(f"Error converting to DataFrame: {e}")
+        return pd.DataFrame()
 
-    # Safely convert and filter
+    # Check if required columns exist
+    required_columns = ['date', 'category', 'type']
+    if not all(col in df.columns for col in required_columns):
+        return pd.DataFrame()
+
+    # Process the data
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
     df.dropna(subset=['date', 'category', 'type'], inplace=True)
 
+    if df.empty:
+        return df
+
+    # Extract month and year from date
     df['month'] = df['date'].dt.month
     df['year'] = df['date'].dt.year
 
+    # Group by category, type, month, year to count crimes
     summary = df.groupby(['category', 'type', 'month', 'year']).size().reset_index(name='crimes')
-    return summary
 
+    return summary
 
 
 @app.get("/predict_firebase_summary")
