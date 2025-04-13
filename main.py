@@ -34,37 +34,35 @@ async def root():
 
 # Fetch and aggregate data from Firebase
 def fetch_and_aggregate_firebase(path: str) -> pd.DataFrame:
-    # Connect to the Firebase path
     ref = db.reference(path)
     raw_data = ref.get()
 
-    # If no data, return empty DataFrame
     if not raw_data:
         return pd.DataFrame()
 
-    # Ensure data is in list-of-dict format
+    # Convert to list of dicts, skip invalid entries
     if isinstance(raw_data, dict):
-        records = list(raw_data.values())
+        records = [v for v in raw_data.values() if isinstance(v, dict)]
     elif isinstance(raw_data, list):
-        records = raw_data
+        records = [v for v in raw_data if isinstance(v, dict)]
     else:
         raise ValueError("Unexpected data format from Firebase")
 
-    # Convert to DataFrame
+    if not records:
+        return pd.DataFrame()
+
     df = pd.DataFrame(records)
 
-    # Coerce date column and drop rows with missing essential fields
+    # Safely convert and filter
     df['date'] = pd.to_datetime(df['date'], errors='coerce')
     df.dropna(subset=['date', 'category', 'type'], inplace=True)
 
-    # Extract month and year from date
     df['month'] = df['date'].dt.month
     df['year'] = df['date'].dt.year
 
-    # Group by category, type, month, year to count crimes
     summary = df.groupby(['category', 'type', 'month', 'year']).size().reset_index(name='crimes')
-
     return summary
+
 
 
 @app.get("/predict_firebase_summary")
