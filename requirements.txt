@@ -1,1 +1,12 @@
 fastapi[all]
+firebase-admin
+pandas
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+uvicorn
+xgboost
+scikit-learn
+numpy
+matplotlib
