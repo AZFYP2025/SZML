@@ -124,29 +124,55 @@ def predict_firebase_summary():
     return df_summary.to_dict(orient="records")
 
 
-@app.get("/plot_firebase_prediction")
-def plot_firebase_prediction():
+@app.get("/plot_firebase_prediction_2025")
+def plot_firebase_prediction_2025():
+    # Get historical data
     df_summary = fetch_and_aggregate_firebase("crime_data")
     if df_summary.empty:
         return {"error": "No data found to summarize"}
 
-    X_cat = df_summary[['category', 'type']]
-    X_num = df_summary[['month', 'year']]
-    X_encoded = encoder.transform(X_cat)
-    X_input = np.hstack([X_encoded, X_num])
-    predictions = model.predict(X_input)
+    # Define crime types we want to predict
+    crime_types = ['theft', 'robbery', 'rape', 'murder', 'causing_injury', 'break_in']
+    
+    # Create predictions for each month of 2025 for each crime type
+    results = {}
+    
+    for crime_type in crime_types:
+        # Filter data for this crime type
+        df_crime = df_summary[df_summary['type'] == crime_type]
+        
+        if df_crime.empty:
+            results[crime_type] = {"error": f"No data found for {crime_type}"}
+            continue
 
-    # Plot predictions
-    plt.figure(figsize=(10, 5))
-    plt.plot(predictions, marker='o')
-    plt.title("Predicted Crime Counts from Firebase Data")
-    plt.xlabel("Record Index")
-    plt.ylabel("Predicted Crimes")
-    plt.grid(True)
-
-    # Save plot to buffer
-    buf = io.BytesIO()
-    plt.savefig(buf, format='png')
-    buf.seek(0)
-
-    return {"image": base64.b64encode(buf.read()).decode("utf-8")}
+        # Prepare features
+        X_cat = df_crime[['category', 'type']]
+        X_num = df_crime[['month', 'year']]
+        
+        try:
+            X_encoded = encoder.transform(X_cat)
+            X_input = np.hstack([X_encoded, X_num])
+            predictions = model.predict(X_input)
+            
+            # Create plot for this crime type
+            plt.figure(figsize=(10, 5))
+            plt.plot(df_crime['month'], predictions, marker='o')
+            plt.title(f"Predicted {crime_type.replace('_', ' ').title()} Counts for 2025")
+            plt.xlabel("Month")
+            plt.ylabel("Predicted Crimes")
+            plt.xticks(range(1, 13))
+            plt.grid(True)
+            
+            # Save plot to buffer
+            buf = io.BytesIO()
+            plt.savefig(buf, format='png')
+            buf.seek(0)
+            plt.close()
+            
+            # Store base64 encoded image
+            results[crime_type] = {"image": base64.b64encode(buf.read()).decode("utf-8")}
+            
+        except Exception as e:
+            results[crime_type] = {"error": f"Prediction failed: {str(e)}"}
+    
+    return results
