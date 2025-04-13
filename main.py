@@ -10,9 +10,13 @@ import joblib
 from fastapi import FastAPI
 from firebase_admin import credentials, initialize_app, db
 from sklearn.preprocessing import OneHotEncoder
+import json
+import os
 
-# Initialize Firebase
-cred = credentials.Certificate("firebase-credentials.json")  # Replace with your key file
+firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
+cred_dict = json.loads(firebase_json)
+cred = credentials.Certificate(cred_dict)
+
 initialize_app(cred, {
     'databaseURL': "https://safezone-660a9-default-rtdb.asia-southeast1.firebasedatabase.app/"
 })
