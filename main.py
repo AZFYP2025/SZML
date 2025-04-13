@@ -23,7 +23,7 @@ initialize_app(cred, {
 
 
 # Load model and encoder
-model = joblib.load("xgboost_model.pkl")
+model = joblib.load("model.pkl")
 encoder: OneHotEncoder = joblib.load("encoder.pkl")
 
 app = FastAPI()
