@@ -35,10 +35,10 @@ def fetch_firebase_data():
     data = ref.get()
     if not data:
         return pd.DataFrame()
-    
+
     rows = []
     for _, v in data.items():
-        if v.get("source") == "synth":
+        if isinstance(v, dict) and v.get("source") == "synth":
             rows.append({
                 "category": v.get("category"),
                 "type": v.get("type"),
@@ -46,8 +46,7 @@ def fetch_firebase_data():
                 "crimes": v.get("crimes"),
                 "source": v.get("source")
             })
-    df = pd.DataFrame(rows)
-    return df
+    return pd.DataFrame(rows)
 
 @app.get("/plot_by_crime_type")
 def plot_by_crime_type():
