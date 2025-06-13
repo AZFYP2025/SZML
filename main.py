@@ -1,5 +1,4 @@
-from typing import Optional
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from pydantic import BaseModel
 import pandas as pd
 import numpy as np
@@ -7,33 +6,63 @@ import matplotlib.pyplot as plt
 import base64
 import io
 import joblib
-from datetime import timedelta
+import os
+import json
+from datetime import datetime, timedelta
+from firebase_admin import credentials, initialize_app, db
 
+# Firebase init
+firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
+cred_dict = json.loads(firebase_json)
+cred = credentials.Certificate(cred_dict)
+initialize_app(cred, {
+    'databaseURL': "https://safezone-660a9-default-rtdb.asia-southeast1.firebasedatabase.app/"
+})
+
+# FastAPI app
 app = FastAPI()
 
-# Load model + scalers
+# Load model and scalers
 model = joblib.load("model.pkl")
 x_scaler = joblib.load("x_scaler.pkl")
 y_scaler = joblib.load("y_scaler.pkl")
-
-# Load data
-df = pd.read_csv("seasonal_weekly_crime_data_2016_2023.csv", parse_dates=['date'])
-df['year'] = df['date'].dt.year
-df['week'] = df['date'].dt.isocalendar().week.astype(int)
-df['month'] = df['date'].dt.month
-df['sin_week'] = np.sin(2 * np.pi * df['week'] / 52)
-df['cos_week'] = np.cos(2 * np.pi * df['week'] / 52)
-df['is_festive'] = df['month'].isin([1, 5, 6, 11, 12]).astype(int)
-df['is_monsoon'] = df['month'].isin([10, 11, 12, 1]).astype(int)
 
 class CrimeRequest(BaseModel):
     type: str
     category: str
 
+def fetch_firebase_data():
+    ref = db.reference("crime_data")
+    data = ref.get()
+    if not data:
+        return pd.DataFrame()
+    rows = []
+    for _, v in data.items():
+        if isinstance(v, dict) and v.get("source") == "synth":
+            rows.append({
+                "category": v.get("category"),
+                "type": v.get("type"),
+                "date": v.get("date"),
+                "crimes": v.get("crimes")
+            })
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df["crimes"] = pd.to_numeric(df["crimes"], errors="coerce")
+    df.dropna(inplace=True)
+    df['year'] = df['date'].dt.year
+    df['week'] = df['date'].dt.isocalendar().week.astype(int)
+    df['month'] = df['date'].dt.month
+    df['sin_week'] = np.sin(2 * np.pi * df['week'] / 52)
+    df['cos_week'] = np.cos(2 * np.pi * df['week'] / 52)
+    df['is_festive'] = df['month'].isin([1, 5, 6, 11, 12]).astype(int)
+    df['is_monsoon'] = df['month'].isin([10, 11, 12, 1]).astype(int)
+    return df
+
 @app.post("/plot_by_crime_type")
 async def plot_by_crime_type(request: CrimeRequest):
     crime_type = request.type
     crime_category = request.category
+    df = fetch_firebase_data()
 
     df_type = df[(df["type"] == crime_type) & (df["category"] == crime_category)].copy()
     df_type = df_type.sort_values("date").reset_index(drop=True)
@@ -46,10 +75,10 @@ async def plot_by_crime_type(request: CrimeRequest):
     df_type['yoy_change'] = df_type['crimes'] / df_type['lag_52'] - 1
     df_type.dropna(inplace=True)
 
-    future_weeks = []
     last_date = df_type['date'].max()
+    future_weeks = []
 
-    for _ in range(104):  # predict for 2 years
+    for _ in range(104):  # 2 years = 104 weeks
         next_date = last_date + timedelta(weeks=1)
         week = next_date.isocalendar().week
         month = next_date.month
@@ -90,18 +119,18 @@ async def plot_by_crime_type(request: CrimeRequest):
 
         new_row['crimes'] = y_pred
         df_type = pd.concat([df_type, pd.DataFrame([new_row])], ignore_index=True)
-
         future_weeks.append({'date': next_date, 'crimes': y_pred})
         last_date = next_date
 
-    df_all = pd.DataFrame(future_weeks)
-    df_all['month'] = df_all['date'].dt.month
-    df_all['year'] = df_all['date'].dt.year
+    # Forecasted
+    df_future = pd.DataFrame(future_weeks)
+    df_future['month'] = df_future['date'].dt.month
+    df_future['year'] = df_future['date'].dt.year
+    preds_2024 = df_future[df_future['year'] == 2024].groupby('month')['crimes'].sum().reindex(range(1, 13), fill_value=0)
+    preds_2025 = df_future[df_future['year'] == 2025].groupby('month')['crimes'].sum().reindex(range(1, 13), fill_value=0)
 
-    preds_2024 = df_all[df_all['year'] == 2024].groupby('month')['crimes'].sum().reindex(range(1, 13), fill_value=0)
-    preds_2025 = df_all[df_all['year'] == 2025].groupby('month')['crimes'].sum().reindex(range(1, 13), fill_value=0)
-    actual_2023 = df[df["type"] == crime_type]
-    actual_2023 = actual_2023[(actual_2023['category'] == crime_category) & (actual_2023['year'] == 2023)]
+    # Actual 2023
+    actual_2023 = df_type[df_type['year'] == 2023]
     actual_monthly = actual_2023.groupby('month')['crimes'].sum().reindex(range(1, 13), fill_value=0)
 
     # Plot
