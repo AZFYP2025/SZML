@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Query
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,7 +10,7 @@ import os
 import json
 from datetime import datetime
 
-# Initialize Firebase
+# Firebase setup
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
 cred_dict = json.loads(firebase_json)
 cred = credentials.Certificate(cred_dict)
@@ -46,17 +46,13 @@ def fetch_firebase_data():
             })
     return pd.DataFrame(rows)
 
-@app.get("/plot_by_crime_type")
-def plot_by_crime_type():
-    df = fetch_firebase_data()
-    print("Raw data:", df.shape)
+def generate_features(df, category, crime_type):
+    df = df.copy()
+    df = df[df['category'] == category]
+    df = df[df['type'] == crime_type]
+    df['date'] = pd.to_datetime(df['date'])
+    df = df.sort_values('date').reset_index(drop=True)
 
-    if df.empty:
-        return {"error": "No data found"}
-
-    # Parse and preprocess
-    df['date'] = pd.to_datetime(df['date'], errors='coerce')
-    df = df.dropna(subset=['date'])
     df['year'] = df['date'].dt.year
     df['week'] = df['date'].dt.isocalendar().week.astype(int)
     df['month'] = df['date'].dt.month
@@ -64,91 +60,87 @@ def plot_by_crime_type():
     df['cos_week'] = np.cos(2 * np.pi * df['week'] / 52)
     df['is_festive'] = df['month'].isin([1, 5, 6, 11, 12]).astype(int)
     df['is_monsoon'] = df['month'].isin([10, 11, 12, 1]).astype(int)
+    df['crimes'] = df['crimes'].astype(float)
 
-    df = df[df['year'] == 2023]
-    print("Filtered 2023 data:", df.shape)
+    # Weekly aggregation
+    df = df.groupby('date').agg({
+        'crimes': 'sum',
+        'year': 'first',
+        'week': 'first',
+        'month': 'first',
+        'sin_week': 'first',
+        'cos_week': 'first',
+        'is_festive': 'first',
+        'is_monsoon': 'first'
+    }).reset_index()
 
+    # Feature engineering
+    for lag in [1, 2, 3, 4, 52]:
+        df[f'lag_{lag}'] = df['crimes'].shift(lag)
+    df['rolling_4wk_mean'] = df['crimes'].rolling(4).mean().shift(1)
+    df['rolling_4wk_std'] = df['crimes'].rolling(4).std().shift(1)
+    df['rolling_52wk_mean'] = df['crimes'].rolling(52).mean().shift(1)
+    df['yoy_change'] = df['crimes'] / df['lag_52'] - 1
+
+    return df.dropna()
+
+def predict(weekly_df):
+    feature_cols = ['year', 'week', 'month', 'sin_week', 'cos_week',
+                    'is_festive', 'is_monsoon',
+                    'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_52',
+                    'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
+                    'yoy_change']
+
+    X = weekly_df[feature_cols]
+    X_scaled = x_scaler.transform(X)
+
+    y_pred_scaled = model.predict(X_scaled)
+    y_pred_log = y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).ravel()
+    y_pred = np.expm1(y_pred_log)
+
+    weekly_df['predicted'] = y_pred
+    weekly_df['year'] = weekly_df['date'].dt.year
+    weekly_df['month'] = weekly_df['date'].dt.month
+
+    return weekly_df.groupby(['year', 'month'])[['predicted']].sum().reset_index()
+
+def plot_predictions(real_df, pred_df, crime_type):
+    plt.figure(figsize=(10, 5))
+
+    for year in [2023, 2024, 2025]:
+        if year == 2023:
+            data_2023 = real_df[real_df['date'].dt.year == 2023]
+            monthly = data_2023.groupby(data_2023['date'].dt.month)['crimes'].sum().reset_index()
+            plt.plot(monthly['date'], monthly['crimes'], label='2023')
+        else:
+            data_year = pred_df[pred_df['year'] == year]
+            plt.plot(data_year['month'], data_year['predicted'], label=str(year))
+
+    plt.title(f"Monthly Crime Predictions for {crime_type} (2023–2025)")
+    plt.xlabel("Month")
+    plt.ylabel("Crimes")
+    plt.legend()
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format="png")
+    plt.close()
+    buf.seek(0)
+    return base64.b64encode(buf.read()).decode("utf-8")
+
+@app.get("/plot_by_crime_type")
+def plot_by_crime_type(category: str = Query(...), type: str = Query(...)):
+    df = fetch_firebase_data()
     if df.empty:
-        return {"error": "No data from 2023"}
+        return {"error": "No Firebase data found"}
 
-    results = {}
-    for crime_type in df['type'].unique():
-        df_type = df[df['type'] == crime_type].sort_values('date')
-        if df_type.empty:
-            continue
+    df = df[df['date'] < "2024"]
+    df['date'] = pd.to_datetime(df['date'])
 
-        # Feature engineering
-        for lag in [1, 2, 3, 4, 52]:
-            df_type[f'lag_{lag}'] = df_type['crimes'].shift(lag)
-        df_type['rolling_4wk_mean'] = df_type['crimes'].rolling(4).mean().shift(1)
-        df_type['rolling_4wk_std'] = df_type['crimes'].rolling(4).std().shift(1)
-        df_type['rolling_52wk_mean'] = df_type['crimes'].rolling(52).mean().shift(1)
-        df_type['yoy_change'] = df_type['crimes'] / df_type['lag_52'] - 1
-        df_type = df_type.dropna()
+    weekly_df = generate_features(df, category, type)
+    if weekly_df.empty:
+        return {"error": "Not enough data after feature engineering"}
 
-        if df_type.empty:
-            continue
+    pred_df = predict(weekly_df)
+    image_base64 = plot_predictions(weekly_df, pred_df, type)
 
-        # Prepare historical data for plotting
-        actual_2023 = df_type.groupby('month')['crimes'].sum()
-
-        # Generate future data
-        base_row = df_type.iloc[-1]
-        future = []
-        for year in [2024, 2025]:
-            for month in range(1, 13):
-                week = (month - 1) * 4 + 1  # rough estimate
-                sin_week = np.sin(2 * np.pi * week / 52)
-                cos_week = np.cos(2 * np.pi * week / 52)
-                is_festive = int(month in [1, 5, 6, 11, 12])
-                is_monsoon = int(month in [10, 11, 12, 1])
-
-                row = {
-                    "year": year,
-                    "week": week,
-                    "month": month,
-                    "sin_week": sin_week,
-                    "cos_week": cos_week,
-                    "is_festive": is_festive,
-                    "is_monsoon": is_monsoon,
-                    "lag_1": base_row['crimes'],
-                    "lag_2": base_row['crimes'],
-                    "lag_3": base_row['crimes'],
-                    "lag_4": base_row['crimes'],
-                    "lag_52": base_row['crimes'],
-                    "rolling_4wk_mean": base_row['crimes'],
-                    "rolling_4wk_std": 0,
-                    "rolling_52wk_mean": base_row['crimes'],
-                    "yoy_change": 0
-                }
-                future.append(row)
-
-        df_future = pd.DataFrame(future)
-
-        # Predict
-        feature_cols = df_future.columns
-        X_future_scaled = x_scaler.transform(df_future[feature_cols])
-        y_scaled_pred = model.predict(X_future_scaled)
-        y_log_pred = y_scaler.inverse_transform(y_scaled_pred.reshape(-1, 1)).ravel()
-        y_pred = np.expm1(y_log_pred)
-
-        # Plot
-        plt.figure(figsize=(10, 5))
-        plt.plot(actual_2023.index, actual_2023.values, label="2023 Actual", marker='o')
-        plt.plot(range(1, 13), y_pred[:12], label="2024 Predicted", marker='x')
-        plt.plot(range(1, 13), y_pred[12:], label="2025 Predicted", marker='^')
-        plt.title(f"Forecast for {crime_type}")
-        plt.xlabel("Month")
-        plt.ylabel("Crime Count")
-        plt.grid(True)
-        plt.legend()
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format='png')
-        plt.close()
-        buf.seek(0)
-        img_b64 = base64.b64encode(buf.read()).decode("utf-8")
-        results[crime_type] = img_b64
-
-    print("Returning results:", len(results))
-    return results
+    return {"image_base64": image_base64}
