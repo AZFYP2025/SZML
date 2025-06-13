@@ -57,7 +57,6 @@ def plot_by_crime_type():
 
     df_summary['date'] = pd.to_datetime(df_summary['date'], format='%m/%d/%Y', errors='coerce')
     df_summary['year'] = df_summary['date'].dt.year
-    df_summary['date'] = pd.to_datetime(df_summary['date'], format='%m/%d/%Y', errors='coerce')
     df_summary = df_summary.dropna(subset=['date'])
     df_summary['week'] = df_summary['date'].dt.isocalendar().week.astype(int)
     df_summary['month'] = df_summary['date'].dt.month
