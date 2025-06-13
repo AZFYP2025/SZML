@@ -174,6 +174,6 @@ def plot_by_crime_type():
     plot_base64 = base64.b64encode(buf.read()).decode("utf-8")
     plt.close()
 
-return jsonify({"type": crime_type, "category": crime_category, "plot": plot_base64})
+    return jsonify({"type": crime_type, "category": crime_category, "plot": plot_base64})
 
 
