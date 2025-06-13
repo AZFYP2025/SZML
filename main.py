@@ -12,7 +12,7 @@ from datetime import timedelta
 app = FastAPI()
 
 # Load model + scalers
-model = joblib.load("XGBoostModel.pkl")
+model = joblib.load("model.pkl")
 x_scaler = joblib.load("x_scaler.pkl")
 y_scaler = joblib.load("y_scaler.pkl")
 
