@@ -56,7 +56,8 @@ def plot_by_crime_type():
     if df_summary.empty:
         return {"error": "No data found in Firebase."}
 
-    df_summary['date'] = pd.to_datetime(df_summary['date'], format='%m/%d/%Y', errors='coerce')
+    # Fix: correct date format to match "2023-05-01"
+    df_summary['date'] = pd.to_datetime(df_summary['date'], format='%Y-%m-%d', errors='coerce')
     df_summary = df_summary.dropna(subset=['date'])
     df_summary['month'] = df_summary['date'].dt.month
     df_summary['year'] = df_summary['date'].dt.year
@@ -85,14 +86,12 @@ def plot_by_crime_type():
                 })
 
         df_future = pd.DataFrame(input_rows)
-        # Features required by the model
         feature_cols = ['year', 'week', 'month', 'sin_week', 'cos_week',
                         'is_festive', 'is_monsoon',
                         'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_52',
                         'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
                         'yoy_change']
 
-        # Add fake values for those (adjust depending on your trained model)
         for col in feature_cols:
             if col not in df_future.columns:
                 df_future[col] = 0
@@ -103,7 +102,6 @@ def plot_by_crime_type():
             print(f"Prediction failed for {crime_type}: {e}")
             continue
 
-        # Plot
         plt.figure(figsize=(10, 5))
         df_actual_grouped = df_type.groupby('month')['crimes'].sum()
         plt.plot(df_actual_grouped.index, df_actual_grouped.values, label="2023 Actual", marker='o')
