@@ -24,10 +24,8 @@ app = FastAPI()
 async def root():
     return {"message": "Hello World"}
 
-
 def safe_name(name: str) -> str:
     return name.strip().lower().replace(" ", "_")
-
 
 def get_model_and_scalers(category: str, typ: str):
     safe_cat = safe_name(category)
@@ -42,7 +40,6 @@ def get_model_and_scalers(category: str, typ: str):
         joblib.load(x_scaler_path),
         joblib.load(y_scaler_path)
     )
-
 
 def fetch_data(category: str, typ: str):
     ref = db.reference("crime_data")
@@ -61,8 +58,8 @@ def fetch_data(category: str, typ: str):
     df['crimes'] = pd.to_numeric(df['crimes'], errors="coerce")
     return df.dropna().sort_values("date").reset_index(drop=True)
 
-
 def engineer(df):
+    df = df.copy()
     df['year'] = df['date'].dt.year
     df['week'] = df['date'].dt.isocalendar().week.astype(int)
     df['month'] = df['date'].dt.month
@@ -78,103 +75,92 @@ def engineer(df):
     df['yoy_change'] = df['crimes'] / df['lag_52'] - 1
     return df
 
-
 @app.get("/predict_and_plot")
 async def predict_and_plot():
-    ref = db.reference("crime_data")
-    raw = ref.get()
-    if not raw:
-        return {"error": "No crime data found"}
-
-    combos = {("property", "theft")}
-
     results = []
 
-    for category, typ in sorted(combos):
-        try:
-            model, x_scaler, y_scaler = get_model_and_scalers(category, typ)
-            df = fetch_data(category, typ)
-            df = engineer(df)
+    category, typ = "property", "theft"
 
-            feature_cols = [
-                'year', 'week', 'month', 'sin_week', 'cos_week',
-                'is_festive', 'is_monsoon',
-                'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_52',
-                'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
-                'yoy_change'
-            ]
+    try:
+        model, x_scaler, y_scaler = get_model_and_scalers(category, typ)
+        df = fetch_data(category, typ)
+        df = engineer(df)
+        df['forecast'] = False  # mark all as historical
 
-            forecast_weeks = 26
-            history = df.copy()
+        feature_cols = [
+            'year', 'week', 'month', 'sin_week', 'cos_week',
+            'is_festive', 'is_monsoon',
+            'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_52',
+            'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
+            'yoy_change'
+        ]
 
-            for _ in range(forecast_weeks):
-                last_date = history['date'].max()
-                next_date = last_date + pd.Timedelta(weeks=1)
-                new_row = {'date': next_date, 'crimes': np.nan}
-                temp = pd.concat([history, pd.DataFrame([new_row])], ignore_index=True)
-                temp = engineer(temp)
-                if temp.empty:
-                    break
-                latest = temp.tail(1)
-                if latest[feature_cols].isnull().any(axis=1).values[0]:
-                    break
+        forecast_weeks = 52
+        history = df.copy()
 
-                X = x_scaler.transform(latest[feature_cols])
-                y_scaled = model.predict(X)
-                y_log = y_scaler.inverse_transform(y_scaled.reshape(-1, 1)).ravel()
-                y_pred = np.expm1(y_log)[0]
+        for _ in range(forecast_weeks):
+            next_date = history['date'].max() + pd.Timedelta(weeks=1)
+            new_row = pd.DataFrame([{'date': next_date, 'crimes': np.nan}])
+            temp = pd.concat([history, new_row], ignore_index=True)
+            temp = engineer(temp)
 
-                new_row['crimes'] = y_pred
-                new_row['forecast'] = True
-                history = pd.concat([history, pd.DataFrame([new_row])], ignore_index=True)
+            latest = temp.iloc[[-1]].copy()
+            if latest[feature_cols].isnull().any(axis=1).values[0]:
+                continue  # skip but continue loop
 
-            if 'forecast' not in history.columns:
-                history['forecast'] = False
-            else:
-                history['forecast'] = history['forecast'].fillna(False)
+            X = x_scaler.transform(latest[feature_cols])
+            y_scaled = model.predict(X)
+            y_log = y_scaler.inverse_transform(y_scaled.reshape(-1, 1)).ravel()
+            y_pred = np.expm1(y_log)[0]
 
-            history['year'] = history['date'].dt.year
-            history['month'] = history['date'].dt.month
+            latest.at[latest.index[-1], 'crimes'] = y_pred
+            latest.at[latest.index[-1], 'forecast'] = True
+            history = pd.concat([history.iloc[:-1], latest], ignore_index=True)
 
-            fig, ax = plt.subplots(figsize=(8, 5))
+        history['year'] = history['date'].dt.year
+        history['month'] = history['date'].dt.month
 
-            actual = history[(history['year'] == 2023) & (~history['forecast'])]
-            forecast = history[history['forecast']]
+        print(history.tail(10)[['date', 'crimes', 'forecast']])  # DEBUG
 
-            if not actual.empty:
-                monthly_actual = actual.groupby("month")["crimes"].mean()
-                ax.plot(monthly_actual.index, monthly_actual.values, label="2023 Actual", marker='o')
+        fig, ax = plt.subplots(figsize=(8, 5))
 
-            for y in sorted(forecast['year'].unique()):
-                fy = forecast[forecast['year'] == y]
-                if not fy.empty:
-                    monthly_pred = fy.groupby("month")["crimes"].mean()
-                    ax.plot(monthly_pred.index, monthly_pred.values, label=f"{y} Forecast", linestyle="--", marker='o')
+        actual = history[(history['year'] == 2023) & (~history['forecast'])]
+        forecast = history[history['forecast']]
 
-            ax.set_title(f"{category.title()} - {typ.title()}")
-            ax.set_xlabel("Month")
-            ax.set_ylabel("Crimes")
-            ax.legend()
-            ax.grid(True)
-            ax.set_xticks(range(1, 13))
+        if not actual.empty:
+            monthly_actual = actual.groupby("month")["crimes"].mean()
+            ax.plot(monthly_actual.index, monthly_actual.values, label="2023 Actual", marker='o')
 
-            buf = io.BytesIO()
-            plt.savefig(buf, format="png")
-            buf.seek(0)
-            encoded = base64.b64encode(buf.read()).decode('utf-8')
-            plt.close()
+        for y in sorted(forecast['year'].unique()):
+            fy = forecast[forecast['year'] == y]
+            if not fy.empty:
+                monthly_pred = fy.groupby("month")["crimes"].mean()
+                ax.plot(monthly_pred.index, monthly_pred.values, label=f"{y} Forecast", linestyle="--", marker='o')
 
-            results.append({
-                "category": category,
-                "type": typ,
-                "plot_base64": encoded
-            })
+        ax.set_title(f"{category.title()} - {typ.title()}")
+        ax.set_xlabel("Month")
+        ax.set_ylabel("Crimes")
+        ax.legend()
+        ax.grid(True)
+        ax.set_xticks(range(1, 13))
 
-        except Exception as e:
-            results.append({
-                "category": category,
-                "type": typ,
-                "error": str(e)
-            })
+        buf = io.BytesIO()
+        plt.savefig(buf, format="png")
+        buf.seek(0)
+        encoded = base64.b64encode(buf.read()).decode('utf-8')
+        plt.close()
+
+        results.append({
+            "category": category,
+            "type": typ,
+            "plot_base64": encoded
+        })
+
+    except Exception as e:
+        results.append({
+            "category": category,
+            "type": typ,
+            "error": str(e)
+        })
 
     return {"results": results}
