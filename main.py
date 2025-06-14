@@ -104,7 +104,7 @@ async def predict_and_plot():
                 'yoy_change'
             ]
 
-            forecast_weeks = 52
+            forecast_weeks = 26
             history = df.copy()
 
             for _ in range(forecast_weeks):
@@ -139,17 +139,17 @@ async def predict_and_plot():
             fig, ax = plt.subplots(figsize=(8, 5))
 
             actual = history[(history['year'] == 2023) & (~history['forecast'])]
-            forecast = history[(history['year'] >= 2024) & (history['forecast'])]
+            forecast = history[history['forecast']]
 
             if not actual.empty:
                 monthly_actual = actual.groupby("month")["crimes"].mean()
                 ax.plot(monthly_actual.index, monthly_actual.values, label="2023 Actual", marker='o')
 
-            for y in [2024, 2025]:
-                fy = forecast[forecast['year'] == y]
-                if not fy.empty:
-                    monthly_pred = fy.groupby("month")["crimes"].mean()
-                    ax.plot(monthly_pred.index, monthly_pred.values, label=f"{y} Forecast", linestyle="--", marker='o')
+            for y in sorted(forecast['year'].unique()):
+    fy = forecast[forecast['year'] == y]
+    if not fy.empty:
+        monthly_pred = fy.groupby("month")["crimes"].mean()
+        ax.plot(monthly_pred.index, monthly_pred.values, label=f"{y} Forecast", linestyle="--", marker='o')
 
             ax.set_title(f"{category.title()} - {typ.title()}")
             ax.set_xlabel("Month")
