@@ -42,9 +42,9 @@ def generate_forecast_plot(category: str, type_: str):
 
     from firebase_admin import db
 
-ref = db.reference("crime_data")
-snapshots = ref.get()
-df = pd.DataFrame([v for v in snapshots.values() if v.get("source") == "synth"])
+    ref = db.reference("crime_data")
+    snapshots = ref.get()
+    df = pd.DataFrame([v for v in snapshots.values() if v.get("source") == "synth"])
     df['date'] = pd.to_datetime(df['date'])
     df['year'] = df['date'].dt.year
     df['week'] = df['date'].dt.isocalendar().week.astype(int)
