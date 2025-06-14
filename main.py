@@ -104,7 +104,7 @@ async def predict_and_plot():
                 'yoy_change'
             ]
 
-            forecast_weeks = 104
+            forecast_weeks = 26
             history = df.copy()
 
             for _ in range(forecast_weeks):
