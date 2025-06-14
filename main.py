@@ -111,14 +111,27 @@ def generate_forecast_plot(category: str, type_: str):
     actual_2023 = data[data['year'] == 2023][['date', 'crimes']]
     pred_df = pd.DataFrame(predictions, columns=['date', 'predicted_crimes'])
 
-    plt.plot(actual_2023['date'], actual_2023['crimes'], label='Actual 2023', color='blue')
-    plt.plot(pred_df['date'], pred_df['predicted_crimes'], label='Predicted 2024', color='red')
+    # Normalize to dummy year for uniform x-axis (e.g., 2000)
+    actual_2023['plot_date'] = actual_2023['date'].apply(lambda d: d.replace(year=2000))
+    pred_df['plot_date'] = pred_df['date'].apply(lambda d: d.replace(year=2000))
     
-    plt.title(f"Weekly Crimes for {category} - {type_}\n2023 Actual vs 2024 Prediction")
+    plt.figure(figsize=(8, 5))  # Adjust height for compact view
+    plt.plot(actual_2023['plot_date'], actual_2023['crimes'], label='Actual 2023', color='blue')
+    plt.plot(pred_df['plot_date'], pred_df['predicted_crimes'], label='Predicted 2024', color='red')
+    
+    plt.title(f"Weekly Crimes for {category} - {type_}\nMonth-wise View: 2023 vs 2024")
     plt.xlabel("Month")
     plt.ylabel("Crimes")
     plt.legend()
     plt.grid(True)
+    
+    # Set x-axis to show months Jan–Dec only
+    ax = plt.gca()
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    
+    plt.xlim(pd.Timestamp('2000-01-01'), pd.Timestamp('2000-12-31'))
+    plt.tight_layout()
     
     # Format x-axis to show months only
     ax = plt.gca()
