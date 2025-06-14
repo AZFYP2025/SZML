@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 import pandas as pd
 import numpy as np
 import joblib
@@ -18,18 +18,18 @@ initialize_app(cred, {
     'databaseURL': "https://safezone-660a9-default-rtdb.asia-southeast1.firebasedatabase.app/"
 })
 
-# Initialize FastAPI
 app = FastAPI()
 
+# Route: Hello World
 @app.get("/")
 async def root():
-    return {"message": "Crime Prediction API is Live"}
+    return {"message": "Hello World"}
 
-# Helper to standardize file names
+# Utility: Normalize names
 def safe_name(name: str) -> str:
-    return name.replace(" ", "_").lower()
+    return name.strip().lower().replace(" ", "_")
 
-# Load model + scalers based on category and type
+# Load model + scalers
 def get_model_and_scalers(category: str, typ: str):
     safe_cat = safe_name(category)
     safe_typ = safe_name(typ)
@@ -39,14 +39,14 @@ def get_model_and_scalers(category: str, typ: str):
     y_scaler_path = Path(f"models/{safe_cat}__{safe_typ}__y_scaler.pkl")
 
     if not model_path.exists() or not x_scaler_path.exists() or not y_scaler_path.exists():
-        raise FileNotFoundError("Model or scalers not found for this category-type.")
+        raise FileNotFoundError(f"Missing model/scalers for: {category} - {typ}")
 
     model = joblib.load(model_path)
     x_scaler = joblib.load(x_scaler_path)
     y_scaler = joblib.load(y_scaler_path)
     return model, x_scaler, y_scaler
 
-# Fetch from Firebase
+# Load data from Firebase
 def fetch_firebase_data(category: str, typ: str) -> pd.DataFrame:
     ref = db.reference("crime_data")
     data = ref.get()
@@ -89,96 +89,88 @@ def preprocess_input(df: pd.DataFrame) -> pd.DataFrame:
     df['rolling_52wk_mean'] = df['crimes'].rolling(52).mean().shift(1)
     df['yoy_change'] = df['crimes'] / df['lag_52'] - 1
 
-    df = df.dropna()
-    return df
+    return df.dropna()
 
-# Predict endpoint
-@app.get("/predict")
-async def predict(category: str = Query(...), typ: str = Query(...)):
-    df = fetch_firebase_data(category, typ)
-    if df.empty or len(df) < 60:
-        return {"error": "Not enough data to make prediction."}
+# Route: All predictions and plots
+@app.get("/predict_and_plot")
+async def predict_and_plot_all():
+    ref = db.reference("crime_data")
+    raw = ref.get()
+    if not raw:
+        return {"error": "No crime data found in Firebase."}
 
-    df = preprocess_input(df)
+    # Extract unique (category, type) combos
+    combos = set()
+    for v in raw.values():
+        if isinstance(v, dict) and v.get("source") == "synth":
+            combos.add((safe_name(v["category"]), safe_name(v["type"])))
 
-    model, x_scaler, y_scaler = get_model_and_scalers(category, typ)
+    results = []
 
-    feature_cols = ['year', 'week', 'month', 'sin_week', 'cos_week',
-                    'is_festive', 'is_monsoon',
-                    'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_52',
-                    'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
-                    'yoy_change']
+    for category, typ in sorted(combos):
+        try:
+            df = fetch_firebase_data(category, typ)
+            if df.empty or len(df) < 60:
+                continue
 
-    X = df[feature_cols]
-    X_scaled = x_scaler.transform(X)
+            df = preprocess_input(df)
+            model, x_scaler, y_scaler = get_model_and_scalers(category, typ)
 
-    y_scaled_pred = model.predict(X_scaled)
-    y_log_pred = y_scaler.inverse_transform(y_scaled_pred.reshape(-1, 1)).ravel()
-    y_pred = np.expm1(y_log_pred)
+            feature_cols = ['year', 'week', 'month', 'sin_week', 'cos_week',
+                            'is_festive', 'is_monsoon',
+                            'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_52',
+                            'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
+                            'yoy_change']
 
-    df["predicted_crimes"] = y_pred
-    latest = df.iloc[-1][["date", "predicted_crimes"]]
+            X = df[feature_cols]
+            X_scaled = x_scaler.transform(X)
 
-    return {
-        "category": category,
-        "type": typ,
-        "prediction_date": latest["date"].strftime("%Y-%m-%d"),
-        "predicted_crimes": round(latest["predicted_crimes"], 2)
-    }
+            y_scaled_pred = model.predict(X_scaled)
+            y_log_pred = y_scaler.inverse_transform(y_scaled_pred.reshape(-1, 1)).ravel()
+            y_pred = np.expm1(y_log_pred)
 
-# Plot endpoint
-@app.get("/plot")
-async def plot_predictions(category: str = Query(...), typ: str = Query(...)):
-    df = fetch_firebase_data(category, typ)
-    if df.empty or len(df) < 60:
-        return {"error": "Not enough data to generate plot."}
+            df["predicted_crimes"] = y_pred
+            df["year"] = df["date"].dt.year
+            df["month"] = df["date"].dt.month
 
-    df = preprocess_input(df)
-    model, x_scaler, y_scaler = get_model_and_scalers(category, typ)
+            # Plot
+            fig, ax = plt.subplots(figsize=(8, 5))
 
-    feature_cols = ['year', 'week', 'month', 'sin_week', 'cos_week',
-                    'is_festive', 'is_monsoon',
-                    'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_52',
-                    'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
-                    'yoy_change']
+            actual_2023 = df[df['year'] == 2023]
+            if not actual_2023.empty:
+                monthly_actual = actual_2023.groupby("month")["crimes"].mean()
+                ax.plot(monthly_actual.index, monthly_actual.values, label="2023 Actual", marker='o')
 
-    X = df[feature_cols]
-    X_scaled = x_scaler.transform(X)
+            for yr in [2024, 2025]:
+                future = df[df['year'] == yr]
+                if not future.empty:
+                    monthly_pred = future.groupby("month")["predicted_crimes"].mean()
+                    ax.plot(monthly_pred.index, monthly_pred.values, label=f"{yr} Predicted", marker='o', linestyle='--')
 
-    y_scaled_pred = model.predict(X_scaled)
-    y_log_pred = y_scaler.inverse_transform(y_scaled_pred.reshape(-1, 1)).ravel()
-    y_pred = np.expm1(y_log_pred)
+            ax.set_title(f"{category.replace('_',' ').title()} - {typ.replace('_',' ').title()}")
+            ax.set_xlabel("Month")
+            ax.set_ylabel("Crimes")
+            ax.set_xticks(range(1, 13))
+            ax.legend()
+            ax.grid(True)
 
-    df['predicted_crimes'] = y_pred
-    df['year'] = df['date'].dt.year
-    df['month'] = df['date'].dt.month
+            buf = io.BytesIO()
+            plt.savefig(buf, format="png")
+            buf.seek(0)
+            img_base64 = base64.b64encode(buf.read()).decode('utf-8')
+            plt.close()
 
-    fig, ax = plt.subplots(figsize=(10, 6))
+            results.append({
+                "category": category,
+                "type": typ,
+                "plot_base64": img_base64
+            })
 
-    # Actuals for 2023
-    actual_2023 = df[df['year'] == 2023]
-    if not actual_2023.empty:
-        monthly_actual = actual_2023.groupby("month")["crimes"].mean()
-        ax.plot(monthly_actual.index, monthly_actual.values, label="2023 Actual", marker='o', linestyle='-')
+        except Exception as e:
+            results.append({
+                "category": category,
+                "type": typ,
+                "error": str(e)
+            })
 
-    # Predictions for 2024 and 2025
-    for yr in [2024, 2025]:
-        future = df[df['year'] == yr]
-        if not future.empty:
-            monthly_pred = future.groupby("month")["predicted_crimes"].mean()
-            ax.plot(monthly_pred.index, monthly_pred.values, label=f"{yr} Predicted", marker='o', linestyle='--')
-
-    ax.set_title(f"Monthly Crimes for {category} - {typ}")
-    ax.set_xlabel("Month")
-    ax.set_ylabel("Number of Crimes")
-    ax.set_xticks(range(1, 13))
-    ax.legend()
-    ax.grid(True)
-
-    buf = io.BytesIO()
-    plt.savefig(buf, format="png")
-    buf.seek(0)
-    img_base64 = base64.b64encode(buf.read()).decode('utf-8')
-    plt.close()
-
-    return {"image_base64": img_base64}
+    return {"results": results}
