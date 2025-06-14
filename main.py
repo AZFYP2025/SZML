@@ -62,8 +62,7 @@ def fetch_firebase_data(category: str, typ: str) -> pd.DataFrame:
     return df.dropna()
 
 
-def preprocess_input(df: pd.DataFrame) -> pd.DataFrame:
-    df['date'] = pd.to_datetime(df['date'])
+def engineer_features(df: pd.DataFrame) -> pd.DataFrame:
     df['year'] = df['date'].dt.year
     df['week'] = df['date'].dt.isocalendar().week.astype(int)
     df['month'] = df['date'].dt.month
@@ -71,7 +70,6 @@ def preprocess_input(df: pd.DataFrame) -> pd.DataFrame:
     df['cos_week'] = np.cos(2 * np.pi * df['week'] / 52)
     df['is_festive'] = df['month'].isin([1, 5, 6, 11, 12]).astype(int)
     df['is_monsoon'] = df['month'].isin([10, 11, 12, 1]).astype(int)
-    df = df.sort_values("date").reset_index(drop=True)
 
     for lag in [1, 2, 3, 4, 52]:
         df[f'lag_{lag}'] = df['crimes'].shift(lag)
@@ -100,58 +98,61 @@ async def predict_and_plot_all():
             if df.empty or len(df) < 60:
                 continue
 
-            df = preprocess_input(df)
-            last_date = df["date"].max()
-            future_dates = pd.date_range(start=last_date + pd.Timedelta(weeks=1), periods=104, freq='W-SUN')
-
-            future_rows = []
-            for date in future_dates:
-                future_rows.append({
-                    "category": category,
-                    "type": typ,
-                    "date": date,
-                    "crimes": np.nan
-                })
-
-            future_df = pd.DataFrame(future_rows)
-            full_df = pd.concat([df, future_df], ignore_index=True)
-            full_df = preprocess_input(full_df)
+            df["date"] = pd.to_datetime(df["date"])
+            df = df.sort_values("date").reset_index(drop=True)
+            df = engineer_features(df)
 
             model, x_scaler, y_scaler = get_model_and_scalers(category, typ)
 
-            feature_cols = ['year', 'week', 'month', 'sin_week', 'cos_week',
-                            'is_festive', 'is_monsoon',
-                            'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_52',
-                            'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
-                            'yoy_change']
+            future_weeks = 104
+            future_rows = []
 
-            valid_rows = full_df.dropna(subset=feature_cols)
-            X = valid_rows[feature_cols]
-            X_scaled = x_scaler.transform(X)
+            for _ in range(future_weeks):
+                last_row = df.iloc[-1].copy()
+                new_date = last_row["date"] + pd.Timedelta(weeks=1)
+                new_row = {
+                    "date": new_date,
+                    "crimes": np.nan
+                }
 
-            y_scaled_pred = model.predict(X_scaled)
-            y_log_pred = y_scaler.inverse_transform(y_scaled_pred.reshape(-1, 1)).ravel()
-            y_pred = np.expm1(y_log_pred)
+                temp_df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+                temp_df = engineer_features(temp_df)
 
-            valid_rows["predicted_crimes"] = y_pred
-            full_df["predicted_crimes"] = np.nan
-            full_df.update(valid_rows[["predicted_crimes"]])
+                feature_cols = ['year', 'week', 'month', 'sin_week', 'cos_week',
+                                'is_festive', 'is_monsoon',
+                                'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_52',
+                                'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
+                                'yoy_change']
 
-            full_df["year"] = full_df["date"].dt.year
-            full_df["month"] = full_df["date"].dt.month
+                row = temp_df.iloc[[-1]]
+                if row[feature_cols].isnull().any(axis=1).values[0]:
+                    break  # stop if features aren't complete
+
+                X = x_scaler.transform(row[feature_cols])
+                y_scaled = model.predict(X)
+                y_log = y_scaler.inverse_transform(y_scaled.reshape(-1, 1)).ravel()
+                y_pred = np.expm1(y_log)[0]
+
+                new_row["crimes"] = y_pred
+                new_row["predicted"] = True
+                df = pd.concat([df, pd.DataFrame([new_row])], ignore_index=True)
+
+            df["predicted"] = df["predicted"] if "predicted" in df else False
+            df["year"] = df["date"].dt.year
+            df["month"] = df["date"].dt.month
 
             # Plotting
             fig, ax = plt.subplots(figsize=(8, 5))
 
-            actual = full_df[(full_df["year"] == 2023) & full_df["crimes"].notna()]
+            actual = df[(df["year"] == 2023) & (df["predicted"] != True)]
             if not actual.empty:
                 monthly_actual = actual.groupby("month")["crimes"].mean()
                 ax.plot(monthly_actual.index, monthly_actual.values, label="2023 Actual", marker='o')
 
             for yr in [2024, 2025]:
-                pred = full_df[(full_df["year"] == yr) & full_df["predicted_crimes"].notna()]
+                pred = df[(df["year"] == yr) & (df["predicted"] == True)]
                 if not pred.empty:
-                    monthly_pred = pred.groupby("month")["predicted_crimes"].mean()
+                    monthly_pred = pred.groupby("month")["crimes"].mean()
                     ax.plot(monthly_pred.index, monthly_pred.values, label=f"{yr} Predicted", linestyle='--', marker='o')
 
             ax.set_title(f"{category.replace('_',' ').title()} - {typ.replace('_',' ').title()}")
