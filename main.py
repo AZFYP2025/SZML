@@ -1,14 +1,18 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response
+from fastapi.responses import FileResponse
+import joblib
 import pandas as pd
 import numpy as np
-import joblib
+from xgboost import XGBRegressor
+from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
+from sklearn.preprocessing import MinMaxScaler, StandardScaler
+import warnings
 import os
-import json
 import matplotlib.pyplot as plt
-import io
-import base64
-from firebase_admin import credentials, initialize_app, db
-from pathlib import Path
+import json
+from firebase_admin import credentials, initialize_app
+
+warnings.filterwarnings("ignore")
 
 # Firebase init
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
@@ -18,48 +22,30 @@ initialize_app(cred, {
     'databaseURL': "https://safezone-660a9-default-rtdb.asia-southeast1.firebasedatabase.app/"
 })
 
+# Create output directory if it doesn't exist
+# models directory not needed for prediction only
+os.makedirs("plots", exist_ok=True)
+
 app = FastAPI()
 
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
+@app.get("/forecast_image")
+def generate_forecast_plot(category: str, type_: str):
+    safe_cat = category.replace(" ", "_").lower()
+    safe_typ = type_.replace(" ", "_").lower()
 
-def safe_name(name: str) -> str:
-    return name.strip().lower().replace(" ", "_")
+    try:
+        model = joblib.load(f"models/{safe_cat}__{safe_typ}__model.pkl")
+        x_scaler = joblib.load(f"models/{safe_cat}__{safe_typ}__x_scaler.pkl")
+        y_scaler = joblib.load(f"models/{safe_cat}__{safe_typ}__y_scaler.pkl")
+    except FileNotFoundError:
+        return {"error": "Model or scalers not found."}
 
-def get_model_and_scalers(category: str, typ: str):
-    safe_cat = safe_name(category)
-    safe_typ = safe_name(typ)
-    model_path = Path(f"models/{safe_cat}__{safe_typ}__model.pkl")
-    x_scaler_path = Path(f"models/{safe_cat}__{safe_typ}__x_scaler.pkl")
-    y_scaler_path = Path(f"models/{safe_cat}__{safe_typ}__y_scaler.pkl")
-    if not model_path.exists() or not x_scaler_path.exists() or not y_scaler_path.exists():
-        raise FileNotFoundError(f"Missing model/scalers for: {category} - {typ}")
-    return (
-        joblib.load(model_path),
-        joblib.load(x_scaler_path),
-        joblib.load(y_scaler_path)
-    )
+    from firebase_admin import db
 
-def fetch_data(category: str, typ: str):
-    ref = db.reference("crime_data")
-    raw = ref.get()
-    rows = []
-    for v in raw.values():
-        if isinstance(v, dict) and v.get("source") == "synth" and v.get("category") == category and v.get("type") == typ:
-            rows.append({
-                "category": v["category"],
-                "type": v["type"],
-                "date": v["date"],
-                "crimes": v["crimes"]
-            })
-    df = pd.DataFrame(rows)
+ref = db.reference("crime_data")
+snapshots = ref.get()
+df = pd.DataFrame([v for v in snapshots.values() if v.get("source") == "synth"])
     df['date'] = pd.to_datetime(df['date'])
-    df['crimes'] = pd.to_numeric(df['crimes'], errors="coerce")
-    return df.dropna().sort_values("date").reset_index(drop=True)
-
-def engineer(df):
-    df = df.copy()
     df['year'] = df['date'].dt.year
     df['week'] = df['date'].dt.isocalendar().week.astype(int)
     df['month'] = df['date'].dt.month
@@ -67,100 +53,75 @@ def engineer(df):
     df['cos_week'] = np.cos(2 * np.pi * df['week'] / 52)
     df['is_festive'] = df['month'].isin([1, 5, 6, 11, 12]).astype(int)
     df['is_monsoon'] = df['month'].isin([10, 11, 12, 1]).astype(int)
+
+    data = df[(df['category'] == category) & (df['type'] == type_)].copy()
+    data = data.sort_values('date').reset_index(drop=True)
+
     for lag in [1, 2, 3, 4, 52]:
-        df[f'lag_{lag}'] = df['crimes'].shift(lag)
-    df['rolling_4wk_mean'] = df['crimes'].rolling(4).mean().shift(1)
-    df['rolling_4wk_std'] = df['crimes'].rolling(4).std().shift(1)
-    df['rolling_52wk_mean'] = df['crimes'].rolling(52).mean().shift(1)
-    df['yoy_change'] = df['crimes'] / df['lag_52'] - 1
-    return df
+        data[f'lag_{lag}'] = data['crimes'].shift(lag)
+    data['rolling_4wk_mean'] = data['crimes'].rolling(4).mean().shift(1)
+    data['rolling_4wk_std'] = data['crimes'].rolling(4).std().shift(1)
+    data['rolling_52wk_mean'] = data['crimes'].rolling(52).mean().shift(1)
+    data['yoy_change'] = data['crimes'] / data['lag_52'] - 1
+    data = data.dropna().reset_index(drop=True)
 
-@app.get("/predict_and_plot")
-async def predict_and_plot():
-    results = []
+    forecast_weeks = pd.date_range(start="2024-01-01", end="2024-12-31", freq="W-MON")
+    latest = data.iloc[-52:].copy()
+    predictions = []
 
-    category, typ = "property", "theft"
+    for date in forecast_weeks:
+        year = date.year
+        week = date.isocalendar().week
+        month = date.month
+        sin_week = np.sin(2 * np.pi * week / 52)
+        cos_week = np.cos(2 * np.pi * week / 52)
+        is_festive = int(month in [1, 5, 6, 11, 12])
+        is_monsoon = int(month in [10, 11, 12, 1])
 
-    try:
-        model, x_scaler, y_scaler = get_model_and_scalers(category, typ)
-        df = fetch_data(category, typ)
-        df = engineer(df)
-        df['forecast'] = False  # mark all as historical
+        row = {
+            'year': year,
+            'week': week,
+            'month': month,
+            'sin_week': sin_week,
+            'cos_week': cos_week,
+            'is_festive': is_festive,
+            'is_monsoon': is_monsoon
+        }
 
-        feature_cols = [
-            'year', 'week', 'month', 'sin_week', 'cos_week',
-            'is_festive', 'is_monsoon',
-            'lag_1', 'lag_2', 'lag_3', 'lag_4', 'lag_52',
-            'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
-            'yoy_change'
-        ]
+        for lag in [1, 2, 3, 4, 52]:
+            row[f'lag_{lag}'] = latest['crimes'].iloc[-lag]
 
-        forecast_weeks = 52
-        history = df.copy()
+        row['rolling_4wk_mean'] = latest['crimes'].iloc[-4:].mean()
+        row['rolling_4wk_std'] = latest['crimes'].iloc[-4:].std()
+        row['rolling_52wk_mean'] = latest['crimes'].mean()
+        row['yoy_change'] = row['lag_52'] and ((row['lag_1'] / row['lag_52']) - 1) or 0
 
-        for _ in range(forecast_weeks):
-            next_date = history['date'].max() + pd.Timedelta(weeks=1)
-            new_row = pd.DataFrame([{'date': next_date, 'crimes': np.nan}])
-            temp = pd.concat([history, new_row], ignore_index=True)
-            temp = engineer(temp)
+        X_pred = pd.DataFrame([row])
+        X_scaled = x_scaler.transform(X_pred)
+        y_pred_scaled = model.predict(X_scaled)
+        y_pred_log = y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).ravel()
+        y_pred = np.expm1(y_pred_log[0])
 
-            latest = temp.iloc[[-1]].copy()
-            if latest[feature_cols].isnull().any(axis=1).values[0]:
-                continue  # skip but continue loop
+        row['crimes'] = y_pred
+        row['date'] = date
+        latest = pd.concat([latest, pd.DataFrame([row])], ignore_index=True)
+        predictions.append((date, y_pred))
 
-            X = x_scaler.transform(latest[feature_cols])
-            y_scaled = model.predict(X)
-            y_log = y_scaler.inverse_transform(y_scaled.reshape(-1, 1)).ravel()
-            y_pred = np.expm1(y_log)[0]
+    actual_2023 = data[data['year'] == 2023][['date', 'crimes']]
+    pred_df = pd.DataFrame(predictions, columns=['date', 'predicted_crimes'])
 
-            latest.at[latest.index[-1], 'crimes'] = y_pred
-            latest.at[latest.index[-1], 'forecast'] = True
-            history = pd.concat([history.iloc[:-1], latest], ignore_index=True)
+    plt.figure(figsize=(8, 10))  # Taller figure for better mobile visibility
+    plt.plot(actual_2023['date'], actual_2023['crimes'], label='Actual 2023', color='blue')
+    plt.plot(pred_df['date'], pred_df['predicted_crimes'], label='Predicted 2024', color='red')
+    plt.title(f"Weekly Crimes for {category} - {type_}\n2023 Actual vs 2024 Prediction")
+    plt.xlabel("Date")
+    plt.ylabel("Crimes")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
 
-        history['year'] = history['date'].dt.year
-        history['month'] = history['date'].dt.month
+    plot_path = f"plots/{safe_cat}_{safe_typ}_forecast.png"
+    plt.savefig(plot_path)
+    plt.close()
 
-        print(history.tail(10)[['date', 'crimes', 'forecast']])  # DEBUG
-
-        fig, ax = plt.subplots(figsize=(8, 5))
-
-        actual = history[(history['year'] == 2023) & (~history['forecast'])]
-        forecast = history[history['forecast']]
-
-        if not actual.empty:
-            monthly_actual = actual.groupby("month")["crimes"].mean()
-            ax.plot(monthly_actual.index, monthly_actual.values, label="2023 Actual", marker='o')
-
-        for y in sorted(forecast['year'].unique()):
-            fy = forecast[forecast['year'] == y]
-            if not fy.empty:
-                monthly_pred = fy.groupby("month")["crimes"].mean()
-                ax.plot(monthly_pred.index, monthly_pred.values, label=f"{y} Forecast", linestyle="--", marker='o')
-
-        ax.set_title(f"{category.title()} - {typ.title()}")
-        ax.set_xlabel("Month")
-        ax.set_ylabel("Crimes")
-        ax.legend()
-        ax.grid(True)
-        ax.set_xticks(range(1, 13))
-
-        buf = io.BytesIO()
-        plt.savefig(buf, format="png")
-        buf.seek(0)
-        encoded = base64.b64encode(buf.read()).decode('utf-8')
-        plt.close()
-
-        results.append({
-            "category": category,
-            "type": typ,
-            "plot_base64": encoded
-        })
-
-    except Exception as e:
-        results.append({
-            "category": category,
-            "type": typ,
-            "error": str(e)
-        })
-
-    return {"results": results}
+    return FileResponse(plot_path, media_type="image/png")
