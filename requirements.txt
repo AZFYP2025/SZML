@@ -1,11 +1,9 @@
 fastapi[all]
-fastapi
 uvicorn
+firebase-admin
 pandas
 numpy
-matplotlib
+joblib
 scikit-learn
 xgboost
-joblib
-firebase-admin
-python-dotenv
+matplotlib
