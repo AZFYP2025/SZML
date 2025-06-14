@@ -59,6 +59,7 @@ def fetch_data(category: str, typ: str):
     return df.dropna().sort_values("date").reset_index(drop=True)
 
 def engineer(df):
+    df = df.copy()
     df['year'] = df['date'].dt.year
     df['week'] = df['date'].dt.isocalendar().week.astype(int)
     df['month'] = df['date'].dt.month
@@ -89,6 +90,7 @@ async def predict_and_plot():
             model, x_scaler, y_scaler = get_model_and_scalers(category, typ)
             df = fetch_data(category, typ)
             df = engineer(df)
+            df['forecast'] = False  # mark all as historical
 
             feature_cols = [
                 'year', 'week', 'month', 'sin_week', 'cos_week',
@@ -102,28 +104,23 @@ async def predict_and_plot():
             history = df.copy()
 
             for _ in range(forecast_weeks):
-                last_date = history['date'].max()
-                next_date = last_date + pd.Timedelta(weeks=1)
-                new_row = {'date': next_date}
-                history = pd.concat([history, pd.DataFrame([new_row])], ignore_index=True)
-                history = engineer(history)
-                latest = history.tail(1)
+                next_date = history['date'].max() + pd.Timedelta(weeks=1)
+                new_row = pd.DataFrame([{'date': next_date, 'crimes': np.nan}])
+                temp = pd.concat([history, new_row], ignore_index=True)
+                temp = engineer(temp)
 
+                latest = temp.tail(1)
                 if latest[feature_cols].isnull().any(axis=1).values[0]:
-                    continue  # skip but don't break
+                    break
 
                 X = x_scaler.transform(latest[feature_cols])
                 y_scaled = model.predict(X)
                 y_log = y_scaler.inverse_transform(y_scaled.reshape(-1, 1)).ravel()
                 y_pred = np.expm1(y_log)[0]
 
-                history.at[history.index[-1], 'crimes'] = y_pred
-                history.at[history.index[-1], 'forecast'] = True
-
-            if 'forecast' not in history.columns:
-                history['forecast'] = False
-            else:
-                history['forecast'] = history['forecast'].fillna(False)
+                latest.at[latest.index[-1], 'crimes'] = y_pred
+                latest.at[latest.index[-1], 'forecast'] = True
+                history = pd.concat([history.iloc[:-1], latest], ignore_index=True)
 
             history['year'] = history['date'].dt.year
             history['month'] = history['date'].dt.month
