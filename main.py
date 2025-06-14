@@ -146,10 +146,10 @@ async def predict_and_plot():
                 ax.plot(monthly_actual.index, monthly_actual.values, label="2023 Actual", marker='o')
 
             for y in sorted(forecast['year'].unique()):
-    fy = forecast[forecast['year'] == y]
-    if not fy.empty:
-        monthly_pred = fy.groupby("month")["crimes"].mean()
-        ax.plot(monthly_pred.index, monthly_pred.values, label=f"{y} Forecast", linestyle="--", marker='o')
+                fy = forecast[forecast['year'] == y]
+                if not fy.empty:
+                    monthly_pred = fy.groupby("month")["crimes"].mean()
+                    ax.plot(monthly_pred.index, monthly_pred.values, label=f"{y} Forecast", linestyle="--", marker='o')
 
             ax.set_title(f"{category.title()} - {typ.title()}")
             ax.set_xlabel("Month")
