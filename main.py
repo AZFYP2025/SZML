@@ -104,35 +104,52 @@ async def predict_and_plot():
                 'yoy_change'
             ]
 
-            X = df[feature_cols]
-            y = df['crimes']
+            # Forecasting
+            forecast_weeks = 104
+            history = df.copy()
 
-            X_scaled = x_scaler.transform(X)
-            y_log = np.log1p(y)
-            y_scaled = y_scaler.transform(y_log.values.reshape(-1, 1)).ravel()
+            for _ in range(forecast_weeks):
+                last_date = history['date'].max()
+                next_date = last_date + pd.Timedelta(weeks=1)
+                new_row = {'date': next_date, 'crimes': np.nan}
+                temp = pd.concat([history, pd.DataFrame([new_row])], ignore_index=True)
+                temp = engineer(temp)
 
-            y_pred_scaled = model.predict(X_scaled)
-            y_log_pred = y_scaler.inverse_transform(y_pred_scaled.reshape(-1, 1)).ravel()
-            y_pred = np.expm1(y_log_pred)
+                latest = temp.iloc[[-1]]
+                if latest[feature_cols].isnull().any(axis=1).values[0]:
+                    break
 
-            df['predicted_crimes'] = y_pred
+                X = x_scaler.transform(latest[feature_cols])
+                y_scaled = model.predict(X)
+                y_log = y_scaler.inverse_transform(y_scaled.reshape(-1, 1)).ravel()
+                y_pred = np.expm1(y_log)[0]
 
-            df['year'] = df['date'].dt.year
-            df['month'] = df['date'].dt.month
+                new_row['crimes'] = y_pred
+                new_row['forecast'] = True
+                history = pd.concat([history, pd.DataFrame([new_row])], ignore_index=True)
+
+            if 'forecast' not in history.columns:
+                history['forecast'] = False
+            else:
+                history['forecast'] = history['forecast'].fillna(False)
+
+            history['year'] = history['date'].dt.year
+            history['month'] = history['date'].dt.month
 
             fig, ax = plt.subplots(figsize=(8, 5))
 
-            actual = df[df['year'] == 2023]
+            actual = history[(history['year'] == 2023) & (~history['forecast'])]
+            forecast = history[(history['year'] >= 2024) & (history['forecast'])]
+
             if not actual.empty:
                 monthly_actual = actual.groupby("month")["crimes"].mean()
                 ax.plot(monthly_actual.index, monthly_actual.values, label="2023 Actual", marker='o')
 
-            df['predicted'] = True
-            for y in [2023]:
-                pred = df[df['year'] == y]
-                if not pred.empty:
-                    monthly_pred = pred.groupby("month")["predicted_crimes"].mean()
-                    ax.plot(monthly_pred.index, monthly_pred.values, label=f"{y} Predicted", linestyle="--", marker='o')
+            for y in [2024, 2025]:
+                fy = forecast[forecast['year'] == y]
+                if not fy.empty:
+                    monthly_pred = fy.groupby("month")["crimes"].mean()
+                    ax.plot(monthly_pred.index, monthly_pred.values, label=f"{y} Forecast", linestyle="--", marker='o')
 
             ax.set_title(f"{category.title()} - {typ.title()}")
             ax.set_xlabel("Month")
