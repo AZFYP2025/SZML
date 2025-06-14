@@ -10,6 +10,7 @@ import warnings
 import os
 import matplotlib.pyplot as plt
 import json
+import matplotlib.dates as mdates
 from firebase_admin import credentials, initialize_app
 
 warnings.filterwarnings("ignore")
@@ -110,15 +111,19 @@ def generate_forecast_plot(category: str, type_: str):
     actual_2023 = data[data['year'] == 2023][['date', 'crimes']]
     pred_df = pd.DataFrame(predictions, columns=['date', 'predicted_crimes'])
 
-    plt.figure(figsize=(8, 10))  # Taller figure for better mobile visibility
     plt.plot(actual_2023['date'], actual_2023['crimes'], label='Actual 2023', color='blue')
     plt.plot(pred_df['date'], pred_df['predicted_crimes'], label='Predicted 2024', color='red')
+    
     plt.title(f"Weekly Crimes for {category} - {type_}\n2023 Actual vs 2024 Prediction")
-    plt.xlabel("Date")
+    plt.xlabel("Month")
     plt.ylabel("Crimes")
     plt.legend()
     plt.grid(True)
-    plt.tight_layout()
+    
+    # Format x-axis to show months only
+    ax = plt.gca()
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
 
     plot_path = f"plots/{safe_cat}_{safe_typ}_forecast.png"
     plt.savefig(plot_path)
