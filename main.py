@@ -10,7 +10,7 @@ import base64
 from firebase_admin import credentials, initialize_app, db
 from pathlib import Path
 
-# Initialize Firebase
+# Firebase init
 firebase_json = os.environ.get("FIREBASE_CREDENTIALS")
 cred_dict = json.loads(firebase_json)
 cred = credentials.Certificate(cred_dict)
@@ -20,39 +20,30 @@ initialize_app(cred, {
 
 app = FastAPI()
 
-# Route: Hello World
 @app.get("/")
 async def root():
     return {"message": "Hello World"}
 
-# Utility: Normalize names
 def safe_name(name: str) -> str:
     return name.strip().lower().replace(" ", "_")
 
-# Load model + scalers
 def get_model_and_scalers(category: str, typ: str):
     safe_cat = safe_name(category)
     safe_typ = safe_name(typ)
-
     model_path = Path(f"models/{safe_cat}__{safe_typ}__model.pkl")
     x_scaler_path = Path(f"models/{safe_cat}__{safe_typ}__x_scaler.pkl")
     y_scaler_path = Path(f"models/{safe_cat}__{safe_typ}__y_scaler.pkl")
-
     if not model_path.exists() or not x_scaler_path.exists() or not y_scaler_path.exists():
         raise FileNotFoundError(f"Missing model/scalers for: {category} - {typ}")
+    return (
+        joblib.load(model_path),
+        joblib.load(x_scaler_path),
+        joblib.load(y_scaler_path)
+    )
 
-    model = joblib.load(model_path)
-    x_scaler = joblib.load(x_scaler_path)
-    y_scaler = joblib.load(y_scaler_path)
-    return model, x_scaler, y_scaler
-
-# Load data from Firebase
 def fetch_firebase_data(category: str, typ: str) -> pd.DataFrame:
     ref = db.reference("crime_data")
     data = ref.get()
-    if not data:
-        return pd.DataFrame()
-
     rows = []
     for _, v in data.items():
         if isinstance(v, dict) and v.get("source") == "synth" and v.get("category") == category and v.get("type") == typ:
@@ -60,16 +51,13 @@ def fetch_firebase_data(category: str, typ: str) -> pd.DataFrame:
                 "category": v.get("category"),
                 "type": v.get("type"),
                 "date": v.get("date"),
-                "crimes": v.get("crimes"),
-                "source": v.get("source")
+                "crimes": v.get("crimes")
             })
-
     df = pd.DataFrame(rows)
     df["crimes"] = pd.to_numeric(df["crimes"], errors="coerce")
     df = df.dropna()
     return df
 
-# Feature engineering
 def preprocess_input(df: pd.DataFrame) -> pd.DataFrame:
     df['date'] = pd.to_datetime(df['date'])
     df['year'] = df['date'].dt.year
@@ -79,7 +67,6 @@ def preprocess_input(df: pd.DataFrame) -> pd.DataFrame:
     df['cos_week'] = np.cos(2 * np.pi * df['week'] / 52)
     df['is_festive'] = df['month'].isin([1, 5, 6, 11, 12]).astype(int)
     df['is_monsoon'] = df['month'].isin([10, 11, 12, 1]).astype(int)
-
     df = df.sort_values("date").reset_index(drop=True)
 
     for lag in [1, 2, 3, 4, 52]:
@@ -88,10 +75,8 @@ def preprocess_input(df: pd.DataFrame) -> pd.DataFrame:
     df['rolling_4wk_std'] = df['crimes'].rolling(4).std().shift(1)
     df['rolling_52wk_mean'] = df['crimes'].rolling(52).mean().shift(1)
     df['yoy_change'] = df['crimes'] / df['lag_52'] - 1
-
     return df.dropna()
 
-# Route: All predictions and plots
 @app.get("/predict_and_plot")
 async def predict_and_plot_all():
     ref = db.reference("crime_data")
@@ -99,14 +84,10 @@ async def predict_and_plot_all():
     if not raw:
         return {"error": "No crime data found in Firebase."}
 
-    # Extract unique (category, type) combos
-    combos = set()
-    for v in raw.values():
-        if isinstance(v, dict) and v.get("source") == "synth":
-            combos.add((safe_name(v["category"]), safe_name(v["type"])))
+    combos = {(safe_name(v["category"]), safe_name(v["type"]))
+              for v in raw.values() if v.get("source") == "synth"}
 
     results = []
-
     for category, typ in sorted(combos):
         try:
             df = fetch_firebase_data(category, typ)
@@ -114,6 +95,30 @@ async def predict_and_plot_all():
                 continue
 
             df = preprocess_input(df)
+            last_known = df.iloc[-1].copy()
+            last_date = df['date'].max()
+
+            # Generate 104 future weeks (2 years)
+            future_dates = pd.date_range(start=last_date + pd.Timedelta(weeks=1), periods=104, freq='W-SUN')
+            future_rows = []
+
+            for date in future_dates:
+                row = last_known.copy()
+                row["date"] = date
+                row["year"] = date.year
+                row["week"] = date.isocalendar().week
+                row["month"] = date.month
+                row["sin_week"] = np.sin(2 * np.pi * row["week"] / 52)
+                row["cos_week"] = np.cos(2 * np.pi * row["week"] / 52)
+                row["is_festive"] = int(row["month"] in [1, 5, 6, 11, 12])
+                row["is_monsoon"] = int(row["month"] in [10, 11, 12, 1])
+                row["crimes"] = np.nan  # to be predicted
+                future_rows.append(row)
+
+            future_df = pd.DataFrame(future_rows)
+            full_df = pd.concat([df, future_df], ignore_index=True)
+            full_df = preprocess_input(full_df)
+
             model, x_scaler, y_scaler = get_model_and_scalers(category, typ)
 
             feature_cols = ['year', 'week', 'month', 'sin_week', 'cos_week',
@@ -122,30 +127,32 @@ async def predict_and_plot_all():
                             'rolling_4wk_mean', 'rolling_4wk_std', 'rolling_52wk_mean',
                             'yoy_change']
 
-            X = df[feature_cols]
+            X = full_df[feature_cols]
             X_scaled = x_scaler.transform(X)
 
             y_scaled_pred = model.predict(X_scaled)
             y_log_pred = y_scaler.inverse_transform(y_scaled_pred.reshape(-1, 1)).ravel()
             y_pred = np.expm1(y_log_pred)
 
-            df["predicted_crimes"] = y_pred
-            df["year"] = df["date"].dt.year
-            df["month"] = df["date"].dt.month
+            full_df["predicted_crimes"] = y_pred
+            full_df["year"] = full_df["date"].dt.year
+            full_df["month"] = full_df["date"].dt.month
 
             # Plot
             fig, ax = plt.subplots(figsize=(8, 5))
 
-            actual_2023 = df[df['year'] == 2023]
-            if not actual_2023.empty:
-                monthly_actual = actual_2023.groupby("month")["crimes"].mean()
+            # Actual (2023)
+            actual = full_df[(full_df['year'] == 2023) & (full_df['crimes'].notna())]
+            if not actual.empty:
+                monthly_actual = actual.groupby("month")["crimes"].mean()
                 ax.plot(monthly_actual.index, monthly_actual.values, label="2023 Actual", marker='o')
 
+            # Forecasted (2024–2025)
             for yr in [2024, 2025]:
-                future = df[df['year'] == yr]
-                if not future.empty:
-                    monthly_pred = future.groupby("month")["predicted_crimes"].mean()
-                    ax.plot(monthly_pred.index, monthly_pred.values, label=f"{yr} Predicted", marker='o', linestyle='--')
+                pred = full_df[full_df['year'] == yr]
+                if not pred.empty:
+                    monthly_pred = pred.groupby("month")["predicted_crimes"].mean()
+                    ax.plot(monthly_pred.index, monthly_pred.values, label=f"{yr} Predicted", linestyle='--', marker='o')
 
             ax.set_title(f"{category.replace('_',' ').title()} - {typ.replace('_',' ').title()}")
             ax.set_xlabel("Month")
