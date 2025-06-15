@@ -29,7 +29,7 @@ os.makedirs("plots", exist_ok=True)
 
 app = FastAPI()
 
-@app.get("/forecast_image")
+@app.get("/forecast_data")
 def generate_forecast_plot(category: str, type_: str):
     safe_cat = category.replace(" ", "_").lower()
     safe_typ = type_.replace(" ", "_").lower()
@@ -111,35 +111,18 @@ def generate_forecast_plot(category: str, type_: str):
     actual_2023 = data[data['year'] == 2023][['date', 'crimes']]
     pred_df = pd.DataFrame(predictions, columns=['date', 'predicted_crimes'])
 
-    # Normalize to dummy year for uniform x-axis (e.g., 2000)
-    actual_2023['plot_date'] = actual_2023['date'].apply(lambda d: d.replace(year=2000))
-    pred_df['plot_date'] = pred_df['date'].apply(lambda d: d.replace(year=2000))
-    
-    plt.figure(figsize=(8, 5))  # Adjust height for compact view
-    plt.plot(actual_2023['plot_date'], actual_2023['crimes'], label='Actual 2023', color='blue')
-    plt.plot(pred_df['plot_date'], pred_df['predicted_crimes'], label='Predicted 2024', color='red')
-    
-    plt.title(f"Weekly Crimes for {category} - {type_}\nMonth-wise View: 2023 vs 2024")
-    plt.xlabel("Month")
-    plt.ylabel("Crimes")
-    plt.legend()
-    plt.grid(True)
-    
-    # Set x-axis to show months Jan–Dec only
-    ax = plt.gca()
-    ax.xaxis.set_major_locator(mdates.MonthLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
-    
-    plt.xlim(pd.Timestamp('2000-01-01'), pd.Timestamp('2000-12-31'))
-    plt.tight_layout()
-    
-    # Format x-axis to show months only
-    ax = plt.gca()
-    ax.xaxis.set_major_locator(mdates.MonthLocator())
-    ax.xaxis.set_major_formatter(mdates.DateFormatter('%b'))
+    # Format response
+    response = {
+        "category": category,
+        "type": type_,
+        "actual_2023": [
+            {"month": int(row["month"]), "date": row["date"].strftime("%Y-%m-%d"), "crimes": row["crimes"]}
+            for _, row in actual_2023.iterrows()
+        ],
+        "predicted_2024": [
+            {"month": int(row["month"]), "date": row["date"].strftime("%Y-%m-%d"), "crimes": row["predicted_crimes"]}
+            for _, row in pred_df.iterrows()
+        ]
+    }
 
-    plot_path = f"plots/{safe_cat}_{safe_typ}_forecast.png"
-    plt.savefig(plot_path)
-    plt.close()
-
-    return FileResponse(plot_path, media_type="image/png")
+    return response
