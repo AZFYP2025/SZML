@@ -1,16 +1,13 @@
-from fastapi import FastAPI, Response
-from fastapi.responses import FileResponse
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 import joblib
 import pandas as pd
 import numpy as np
 from xgboost import XGBRegressor
-from sklearn.metrics import r2_score, mean_squared_error, mean_absolute_error
 from sklearn.preprocessing import MinMaxScaler, StandardScaler
 import warnings
 import os
-import matplotlib.pyplot as plt
 import json
-import matplotlib.dates as mdates
 from firebase_admin import credentials, initialize_app
 
 warnings.filterwarnings("ignore")
@@ -22,10 +19,6 @@ cred = credentials.Certificate(cred_dict)
 initialize_app(cred, {
     'databaseURL': "https://safezone-660a9-default-rtdb.asia-southeast1.firebasedatabase.app/"
 })
-
-# Create output directory if it doesn't exist
-# models directory not needed for prediction only
-os.makedirs("plots", exist_ok=True)
 
 app = FastAPI()
 
@@ -39,7 +32,7 @@ def generate_forecast_plot(category: str, type_: str):
         x_scaler = joblib.load(f"models/{safe_cat}__{safe_typ}__x_scaler.pkl")
         y_scaler = joblib.load(f"models/{safe_cat}__{safe_typ}__y_scaler.pkl")
     except FileNotFoundError:
-        return {"error": "Model or scalers not found."}
+        return JSONResponse(content={"error": "Model or scalers not found."}, status_code=404)
 
     from firebase_admin import db
 
@@ -109,19 +102,28 @@ def generate_forecast_plot(category: str, type_: str):
         predictions.append((date, y_pred))
 
     actual_2023 = data[data['year'] == 2023][['date', 'crimes']]
-    actual_2023['month'] = actual_2023['date'].dt.month
+    actual_2023['month'] = actual_2023['date'].dt.month  # ✅ ensure month exists
     pred_df = pd.DataFrame(predictions, columns=['date', 'predicted_crimes'])
+    pred_df['month'] = pred_df['date'].dt.month  # ✅ ensure month exists
 
-    # Format response
+    # Prepare JSON response
     response = {
         "category": category,
         "type": type_,
         "actual_2023": [
-            {"month": int(row["month"]), "date": row["date"].strftime("%Y-%m-%d"), "crimes": row["crimes"]}
+            {
+                "month": int(row["month"]),
+                "date": row["date"].strftime("%Y-%m-%d"),
+                "crimes": row["crimes"]
+            }
             for _, row in actual_2023.iterrows()
         ],
         "predicted_2024": [
-            {"month": int(row["month"]), "date": row["date"].strftime("%Y-%m-%d"), "crimes": row["predicted_crimes"]}
+            {
+                "month": int(row["month"]),
+                "date": row["date"].strftime("%Y-%m-%d"),
+                "crimes": row["predicted_crimes"]
+            }
             for _, row in pred_df.iterrows()
         ]
     }
