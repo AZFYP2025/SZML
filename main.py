@@ -109,6 +109,7 @@ def generate_forecast_plot(category: str, type_: str):
         predictions.append((date, y_pred))
 
     actual_2023 = data[data['year'] == 2023][['date', 'crimes']]
+    actual_2023['month'] = actual_2023['date'].dt.month
     pred_df = pd.DataFrame(predictions, columns=['date', 'predicted_crimes'])
 
     # Format response
